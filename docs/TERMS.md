@@ -67,4 +67,4 @@ These terms are governed by French law.
 
 ## 10. Contact
 
-corinne.mario84120@gmail.com
+ecofin@runiacorp.eu

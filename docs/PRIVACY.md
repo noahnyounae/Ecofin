@@ -13,7 +13,7 @@ server, no user accounts, no analytics, and shares data with nobody.
 ecofin is operated by a single private individual for their own personal use.
 That person is both the sole operator and the only data subject.
 
-**Contact:** corinne.mario84120@gmail.com
+**Contact:** ecofin@runiacorp.eu
 
 ## What data is processed
 
