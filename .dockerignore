@@ -1,0 +1,21 @@
+# Le contexte de build ne doit contenir ni secret ni donnée bancaire : tout ce
+# qui est listé ici est invisible depuis le Dockerfile.
+.git
+target
+docs
+
+*.pem
+*.db
+*.db-wal
+*.db-shm
+config.toml
+
+.DS_Store
+
+.env
+
+# Les secrets sont montés à l'exécution, jamais copiés dans une image.
+secrets
+
+# Les relevés sont montés à l'exécution, jamais copiés dans une image.
+imports

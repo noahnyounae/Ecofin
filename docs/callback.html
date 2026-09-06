@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>ecofin — retour d'autorisation</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f5;
+    --panel: #ffffff;
+    --ink: #1a1a18;
+    --muted: #6b6b66;
+    --line: #e0e0da;
+    --accent: #1f6f4a;
+    --error: #a3341f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --panel: #1f1f24;
+      --ink: #ececf0;
+      --muted: #9a9aa2;
+      --line: #34343c;
+      --accent: #4bbd85;
+      --error: #e8846b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 40rem; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0 0 2rem; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: .6rem;
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+  }
+  .label {
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+    margin-bottom: .5rem;
+  }
+  .value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .82rem;
+    word-break: break-all;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: .4rem;
+    padding: .75rem;
+    user-select: all;
+  }
+  button {
+    margin-top: .85rem;
+    padding: .55rem 1.1rem;
+    font: inherit;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border: 0;
+    border-radius: .4rem;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  ol { padding-left: 1.2rem; color: var(--muted); }
+  ol code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: .25rem;
+    padding: .05rem .35rem;
+  }
+  .error { color: var(--error); font-weight: 600; }
+  .muted { color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ecofin</h1>
+  <p class="sub">Retour d'autorisation bancaire</p>
+  <div id="out"></div>
+</main>
+
+<script>
+  // Cette page ne fait que ré-afficher ce que la banque a mis dans l'URL, pour
+  // que l'utilisateur puisse le recopier dans le terminal. Rien n'est envoyé
+  // nulle part : il n'y a ni requête réseau ni stockage.
+  (function () {
+    var params = new URLSearchParams(window.location.search);
+    var out = document.getElementById("out");
+
+    function card(label, value) {
+      var div = document.createElement("div");
+      div.className = "card";
+
+      var head = document.createElement("div");
+      head.className = "label";
+      head.textContent = label;
+
+      var body = document.createElement("div");
+      body.className = "value";
+      body.textContent = value;
+
+      var copy = document.createElement("button");
+      copy.textContent = "Copier";
+      copy.addEventListener("click", function () {
+        navigator.clipboard.writeText(value).then(function () {
+          copy.textContent = "Copié";
+          setTimeout(function () { copy.textContent = "Copier"; }, 1600);
+        }, function () {
+          copy.textContent = "Copie impossible — sélectionne le texte";
+        });
+      });
+
+      div.appendChild(head);
+      div.appendChild(body);
+      div.appendChild(copy);
+      return div;
+    }
+
+    var error = params.get("error");
+    if (error) {
+      var description = params.get("error_description");
+      var p = document.createElement("p");
+      p.className = "error";
+      p.textContent = "La banque a refusé l'autorisation : " + error +
+        (description ? " — " + description : "");
+      out.appendChild(p);
+
+      var retry = document.createElement("p");
+      retry.className = "muted";
+      retry.textContent = "Relance la commande ecofin link new dans ton terminal.";
+      out.appendChild(retry);
+      return;
+    }
+
+    if (!params.get("code")) {
+      var idle = document.createElement("p");
+      idle.className = "muted";
+      idle.textContent =
+        "Cette page reçoit le retour d'autorisation d'ecofin. " +
+        "Ouvre-la depuis ta banque, pas directement.";
+      out.appendChild(idle);
+      return;
+    }
+
+    out.appendChild(card("URL à coller dans le terminal", window.location.href));
+
+    var steps = document.createElement("ol");
+    steps.innerHTML =
+      "<li>Clique sur <strong>Copier</strong> ci-dessus.</li>" +
+      "<li>Reviens au terminal, à l'invite <code>URL de retour :</code></li>" +
+      "<li>Colle, puis valide.</li>";
+    out.appendChild(steps);
+  })();
+</script>
+</body>
+</html>

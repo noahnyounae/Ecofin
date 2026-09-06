@@ -1,0 +1,12 @@
+/target
+
+# Ne jamais committer de secret ni de donnée bancaire : la configuration réelle
+# vit dans ~/.config/ecofin, mais ECOFIN_HOME peut la placer ici pendant un test.
+*.pem
+*.db
+*.db-wal
+*.db-shm
+config.toml
+
+# Token du tunnel Cloudflare — ne jamais committer.
+.env

@@ -1,0 +1,195 @@
+# Trois services, activés séparément :
+#
+#   cloudflared → tunnel HTTPS, démarré par `docker compose up -d`
+#   ecofin      → le CLI, invoqué par `docker compose run` (profil `cli`)
+#   dev         → boucle de compilation incrémentale (profil `dev`)
+#
+# Les profils évitent que `docker compose up` lance le CLI, qui rendrait la main
+# aussitôt puisqu'il s'agit d'une commande ponctuelle et non d'un service.
+
+services:
+  # Point d'entrée unique. Aiguille /callback vers le listener d'autorisation
+  # bancaire et tout le reste vers l'application web.
+  #
+  # Le socket Docker n'est délibérément pas monté : il donnerait à Traefik un
+  # accès équivalent à root sur l'hôte, pour une découverte automatique dont
+  # deux routes connues d'avance n'ont pas besoin.
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command: ["--configFile=/etc/traefik/traefik.yml"]
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+    ports:
+      # Accès local, par le même chemin qu'en production : le routage est donc
+      # éprouvé dès le développement.
+      - "8080:80"
+    networks:
+      ecofin:
+        aliases:
+          - traefik
+
+  # Expose https://<ton-domaine>/callback et le fait aboutir sur le port 8484
+  # du conteneur ecofin. C'est ce qui rend l'URL de retour conforme à
+  # l'exigence HTTPS d'Enable Banking tout en gardant le code sur ta machine.
+  #
+  # Le tunnel n'a qu'une seule entrée à déclarer dans le tableau de bord Zero
+  # Trust :
+  #
+  #   <domaine> → http://traefik:80
+  #
+  # L'aiguillage entre l'application et le retour d'autorisation est fait par
+  # Traefik, d'après traefik/dynamic/routes.yml — versionné, contrairement à
+  # une configuration saisie dans une interface web.
+  #
+  # `ecofin` et `web`, jamais `localhost` : dans un conteneur, localhost
+  # désigne cloudflared lui-même et le trafic part en 502.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      # Lu depuis .env, jamais écrit dans le dépôt. Compose s'arrête avec ce
+      # message si la variable manque.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?absent — copie .env.example vers .env et colle le token du tunnel}
+    networks:
+      - ecofin
+
+  # Application web. Servie par le tunnel, donc protégée par un compte et un
+  # mot de passe : sans cette barrière, l'URL suffirait à lire quatre ans
+  # d'opérations. Les comptes se créent avec `ecofin user add`.
+  web:
+    build:
+      context: .
+      target: runtime
+    image: ecofin:latest
+    restart: unless-stopped
+    entrypoint: ["ecofin-web"]
+    environment:
+      # Dans un conteneur, écouter sur la boucle locale rendrait le serveur
+      # injoignable, y compris depuis cloudflared.
+      ECOFIN_BIND: 0.0.0.0:8080
+      # Les cookies de session sont marqués `Secure` par défaut, ce qui
+      # suppose HTTPS — le cas derrière le tunnel. À ne lever que pour un accès
+      # direct en http://localhost, sans quoi le navigateur ne les renverrait
+      # jamais et la connexion échouerait sans message clair.
+      ECOFIN_INSECURE_COOKIES: ${ECOFIN_INSECURE_COOKIES:-}
+    volumes:
+      # Monté en écriture, mais le serveur ouvre la base avec une connexion en
+      # lecture seule : c'est SQLite qui refuse les écritures, pas le montage.
+      # En WAL, lire exige de pouvoir créer un fichier d'index partagé — un
+      # montage en lecture seule empêcherait la base de s'ouvrir.
+      - ecofin-data:/data
+    # Aucun port publié : on n'atteint l'application qu'à travers Traefik, en
+    # local comme par le tunnel. Un seul chemin, donc un seul à éprouver.
+    networks:
+      ecofin:
+        aliases:
+          - web
+
+  # Synchronisation automatique, trois fois par jour.
+  #
+  # Contrairement au serveur web, ce service écrit : c'est lui qui interroge la
+  # banque. Il rattrape les créneaux manqués au démarrage, ce qu'une simple
+  # tâche cron ne saurait pas faire — elle ignore qu'elle a été absente.
+  daemon:
+    build:
+      context: .
+      target: runtime
+    image: ecofin:latest
+    restart: unless-stopped
+    entrypoint: ["ecofin", "daemon"]
+    environment:
+      ECOFIN_APPLICATION_ID: ${ECOFIN_APPLICATION_ID:-}
+      ECOFIN_PRIVATE_KEY: ${ECOFIN_PRIVATE_KEY:-/run/secrets/enablebanking.pem}
+      ECOFIN_REDIRECT_URL: ${ECOFIN_REDIRECT_URL:-}
+      ECOFIN_LISTEN: ${ECOFIN_LISTEN:-0.0.0.0:8484}
+    volumes:
+      - ecofin-data:/data
+      - ./secrets:/run/secrets:ro
+    networks:
+      - ecofin
+
+  ecofin:
+    profiles: ["cli"]
+    build:
+      context: .
+      target: runtime
+    image: ecofin:latest
+    # Les commandes interactives (auth login, link new) lisent l'entrée
+    # standard : sans ces deux lignes, les invites défilent sans rien attendre.
+    stdin_open: true
+    tty: true
+    environment:
+      # Tout vient de .env : avec l'identifiant et la clé, le CLI fonctionne
+      # sans qu'un `auth login` ait jamais été lancé, et les conteneurs
+      # redeviennent jetables. Une variable vide est ignorée, pas appliquée.
+      ECOFIN_APPLICATION_ID: ${ECOFIN_APPLICATION_ID:-}
+      ECOFIN_PRIVATE_KEY: ${ECOFIN_PRIVATE_KEY:-/run/secrets/enablebanking.pem}
+      ECOFIN_REDIRECT_URL: ${ECOFIN_REDIRECT_URL:-}
+      # Dans un conteneur, écouter sur la boucle locale rendrait le listener
+      # injoignable, y compris depuis cloudflared.
+      ECOFIN_LISTEN: ${ECOFIN_LISTEN:-0.0.0.0:8484}
+    volumes:
+      # Base de données et configuration. Sans ce volume, l'historique et la
+      # connexion bancaire seraient perdus à chaque arrêt du conteneur.
+      - ecofin-data:/data
+      # La clé privée reste sur l'hôte, montée en lecture seule : elle n'entre
+      # ni dans une couche d'image ni dans un volume. `secrets/` est exclu du
+      # dépôt et du contexte de build.
+      - ./secrets:/run/secrets:ro
+      # Relevés à importer, en lecture seule : ecofin n'a qu'à les lire.
+      # `imports/` est exclu du dépôt et du contexte de build.
+      - ./imports:/imports:ro
+    networks:
+      ecofin:
+        # Sans cet alias, `docker compose run` crée un conteneur que
+        # cloudflared ne sait pas résoudre. Voir aussi l'option
+        # `--use-aliases`, obligatoire côté ligne de commande.
+        aliases:
+          - ecofin
+
+  dev:
+    profiles: ["dev"]
+    image: rust:1.93-bookworm
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    environment:
+      ECOFIN_HOME: /data
+      ECOFIN_APPLICATION_ID: ${ECOFIN_APPLICATION_ID:-}
+      ECOFIN_PRIVATE_KEY: ${ECOFIN_PRIVATE_KEY:-/run/secrets/enablebanking.pem}
+      ECOFIN_REDIRECT_URL: ${ECOFIN_REDIRECT_URL:-}
+      ECOFIN_LISTEN: ${ECOFIN_LISTEN:-0.0.0.0:8484}
+      # Sortie colorée malgré le pipe de Compose.
+      CARGO_TERM_COLOR: always
+    volumes:
+      - .:/app
+      - ./secrets:/run/secrets:ro
+      # target/ et le registre dans des volumes nommés : c'est ce qui rend les
+      # recompilations incrémentales. Un bind mount depuis macOS serait
+      # nettement plus lent sur ces deux répertoires.
+      - cargo-target:/app/target
+      - cargo-registry:/usr/local/cargo/registry
+      - ecofin-data:/data
+    ports:
+      - "8484:8484"
+    networks:
+      ecofin:
+        aliases:
+          - ecofin
+    # cmake pour aws-lc-rs, comme dans le Dockerfile.
+    command: >
+      bash -c "apt-get update -qq
+      && apt-get install -y -qq --no-install-recommends cmake
+      && cargo build
+      && exec bash"
+
+networks:
+  ecofin:
+
+volumes:
+  ecofin-data:
+  cargo-target:
+  cargo-registry:

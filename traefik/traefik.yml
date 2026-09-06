@@ -1,0 +1,28 @@
+# Configuration statique de Traefik.
+#
+# Traefik est le seul point d'entrée du tunnel : il aiguille ensuite vers le
+# serveur web ou vers le listener de retour d'autorisation, selon le chemin.
+# Le routage vit donc dans ce dépôt, versionné, plutôt que dans le tableau de
+# bord Cloudflare — et le tunnel n'a plus qu'une seule entrée à déclarer.
+
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  # Provider par fichier, et non par Docker : cela évite de monter
+  # /var/run/docker.sock, qui donnerait à Traefik un accès équivalent à root
+  # sur l'hôte. Les deux destinations sont connues d'avance, la découverte
+  # automatique n'apporterait rien.
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+# Ni tableau de bord ni API : rien à exposer pour un aiguillage à deux routes.
+api:
+  dashboard: false
+
+log:
+  level: INFO
+
+accessLog: {}

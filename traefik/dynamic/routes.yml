@@ -1,0 +1,37 @@
+# Routage : deux destinations sur un même domaine.
+
+http:
+  routers:
+    # Le retour d'autorisation bancaire, servi par le CLI pendant un
+    # `link new`. Priorité haute : cette route doit primer sur celle qui
+    # capte tout le reste, sinon la banque n'atteindrait jamais le listener.
+    callback:
+      rule: "Path(`/callback`)"
+      priority: 100
+      service: callback
+      entryPoints: [web]
+
+    # Tout le reste : l'application web.
+    app:
+      rule: "PathPrefix(`/`)"
+      priority: 1
+      service: app
+      entryPoints: [web]
+
+  services:
+    callback:
+      loadBalancer:
+        servers:
+          # Conteneur éphémère : il n'existe que le temps d'un `link new`.
+          # Hors de ce laps, Traefik répond 502 sur /callback, ce qui est
+          # l'information juste — rien n'écoute.
+          - url: "http://ecofin:8484"
+
+    app:
+      loadBalancer:
+        servers:
+          - url: "http://web:8080"
+        healthCheck:
+          path: /api/health
+          interval: 30s
+          timeout: 3s
