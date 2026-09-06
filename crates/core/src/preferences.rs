@@ -80,6 +80,17 @@ struct WalletRow {
     parent: Option<i64>,
 }
 
+/// Un apport ponctuel versé à une enveloppe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContributionDef {
+    pub id: i64,
+    pub wallet_id: i64,
+    pub month: Month,
+    /// Signé : négatif, l'apport est un retrait.
+    pub amount: Decimal,
+    pub note: Option<String>,
+}
+
 /// Une règle posée par l'utilisateur.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CategoryRule {
@@ -743,6 +754,12 @@ impl Preferences {
             "DELETE FROM wallet_categories WHERE wallet_id = ?1",
             params![id],
         )?;
+        // Les apports partent avec elle : conservés, ils resteraient invisibles
+        // tout en continuant de peser sur les totaux.
+        self.conn.execute(
+            "DELETE FROM wallet_contributions WHERE user_id = ?1 AND wallet_id = ?2",
+            params![user_id, id],
+        )?;
         self.conn.execute(
             "DELETE FROM wallets WHERE user_id = ?1 AND id = ?2",
             params![user_id, id],
@@ -805,6 +822,88 @@ impl Preferences {
             current = parent;
         }
         Ok(chain)
+    }
+
+    /// Apports ponctuels d'un utilisateur, du plus récent au plus ancien.
+    pub fn contributions(&self, user_id: i64) -> Result<Vec<ContributionDef>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, wallet_id, month, amount, note FROM wallet_contributions
+             WHERE user_id = ?1
+             ORDER BY month DESC, id DESC",
+        )?;
+        let rows: Vec<(i64, i64, String, String, Option<String>)> = stmt
+            .query_map([user_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, wallet_id, month, amount, note)| {
+                // Une ligne illisible est écartée plutôt que de fausser un
+                // solde en silence : mieux vaut un apport manquant, visible,
+                // qu'un total juste en apparence.
+                Some(ContributionDef {
+                    id,
+                    wallet_id,
+                    month: Month::parse(&month)?,
+                    amount: Decimal::from_str(&amount).ok()?,
+                    note,
+                })
+            })
+            .collect())
+    }
+
+    /// Verse un apport ponctuel à une enveloppe, et rend son identifiant.
+    pub fn add_contribution(
+        &self,
+        user_id: i64,
+        wallet_id: i64,
+        month: Month,
+        amount: Decimal,
+        note: Option<&str>,
+    ) -> Result<i64> {
+        if !self.wallet_exists(user_id, wallet_id)? {
+            anyhow::bail!("portefeuille inconnu");
+        }
+        // Un apport nul n'apporte rien et encombrerait l'historique.
+        if amount.is_zero() {
+            anyhow::bail!("un apport ne peut pas être nul");
+        }
+
+        let note = note.map(str::trim).filter(|n| !n.is_empty());
+        self.conn.execute(
+            "INSERT INTO wallet_contributions
+                (user_id, wallet_id, month, amount, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                user_id,
+                wallet_id,
+                month.to_string(),
+                amount.to_string(),
+                note,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Annule un apport ponctuel.
+    pub fn remove_contribution(&self, user_id: i64, id: i64) -> Result<()> {
+        let removed = self.conn.execute(
+            "DELETE FROM wallet_contributions WHERE user_id = ?1 AND id = ?2",
+            params![user_id, id],
+        )?;
+        match removed {
+            0 => anyhow::bail!("apport inconnu"),
+            _ => Ok(()),
+        }
     }
 
     fn wallet_exists(&self, user_id: i64, id: i64) -> Result<bool> {
@@ -1194,6 +1293,97 @@ mod tests {
         let wallets = prefs.wallets(MOI).unwrap();
         assert_eq!(wallets.len(), 1);
         assert_eq!(wallets[0].parent, None);
+    }
+
+    #[test]
+    fn a_contribution_is_recorded_and_read_back() {
+        let prefs = Preferences::in_memory().unwrap();
+        let id = portefeuille(&prefs, "Vacances", "100");
+
+        prefs
+            .add_contribution(
+                MOI,
+                id,
+                Month::parse("2026-01").unwrap(),
+                Decimal::from_str("500").unwrap(),
+                Some("prime"),
+            )
+            .unwrap();
+
+        let apports = prefs.contributions(MOI).unwrap();
+        assert_eq!(apports.len(), 1);
+        assert_eq!(apports[0].wallet_id, id);
+        assert_eq!(apports[0].amount, Decimal::from_str("500").unwrap());
+        assert_eq!(apports[0].note.as_deref(), Some("prime"));
+    }
+
+    #[test]
+    fn a_contribution_to_an_unknown_wallet_is_refused() {
+        let prefs = Preferences::in_memory().unwrap();
+        assert!(
+            prefs
+                .add_contribution(
+                    MOI,
+                    404,
+                    Month::parse("2026-01").unwrap(),
+                    Decimal::from_str("500").unwrap(),
+                    None,
+                )
+                .is_err()
+        );
+    }
+
+    /// Un apport nul n'apporte rien et encombrerait l'historique.
+    #[test]
+    fn a_null_contribution_is_refused() {
+        let prefs = Preferences::in_memory().unwrap();
+        let id = portefeuille(&prefs, "Vacances", "100");
+        assert!(
+            prefs
+                .add_contribution(MOI, id, Month::parse("2026-01").unwrap(), Decimal::ZERO, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_contribution_can_be_cancelled() {
+        let prefs = Preferences::in_memory().unwrap();
+        let id = portefeuille(&prefs, "Vacances", "100");
+        let apport = prefs
+            .add_contribution(
+                MOI,
+                id,
+                Month::parse("2026-01").unwrap(),
+                Decimal::from_str("500").unwrap(),
+                None,
+            )
+            .unwrap();
+
+        prefs.remove_contribution(MOI, apport).unwrap();
+
+        assert!(prefs.contributions(MOI).unwrap().is_empty());
+        assert!(prefs.remove_contribution(MOI, apport).is_err());
+    }
+
+    /// Conservés après la disparition de leur enveloppe, les apports
+    /// resteraient invisibles tout en pesant sur les totaux.
+    #[test]
+    fn removing_a_wallet_takes_its_contributions_with_it() {
+        let prefs = Preferences::in_memory().unwrap();
+        let id = portefeuille(&prefs, "Vacances", "100");
+        prefs
+            .add_contribution(
+                MOI,
+                id,
+                Month::parse("2026-01").unwrap(),
+                Decimal::from_str("500").unwrap(),
+                None,
+            )
+            .unwrap();
+
+        prefs.remove_wallet(MOI, id).unwrap();
+
+        assert!(prefs.contributions(MOI).unwrap().is_empty());
     }
 
     /// Une enveloppe rattachée à « Transport » doit compter « Essence » : sans

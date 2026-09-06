@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+  addContribution,
   addWallet,
   fetchWallets,
+  removeContribution,
   removeWallet,
   updateWallet,
 } from "../../api/client";
@@ -29,6 +31,10 @@ interface Props {
  * est le budget de toute la branche, et ce qu'il en reste finance ses propres
  * catégories. L'argent d'une fille est donc déjà celui de sa mère, jamais
  * compté deux fois.
+ *
+ * Un apport ponctuel se distingue de la dotation : il ne vaut que pour son
+ * mois, et vient de la part non allouée du compte plutôt que du budget d'une
+ * enveloppe mère. Renflouer une fille n'appauvrit donc pas sa mère.
  *
  * La ligne « non alloué » n'est pas un reste comptable : c'est elle qui rend
  * vraie la promesse que la somme des enveloppes vaut le solde du compte.
@@ -129,6 +135,10 @@ export function WalletsScreen({ accountId, currency, categories }: Props) {
                   state.wallets.find((w) => w.id === wallet.carry_to)?.name ?? null
                 }
                 onEdit={() => setEditing(wallet.id)}
+                onContribute={(amount, note) =>
+                  run(() => addContribution(wallet.id, amount, note))
+                }
+                onCancelContribution={(id) => run(() => removeContribution(id))}
               />
             </li>
           ),
@@ -164,9 +174,19 @@ interface CardProps {
   money: (raw: string) => string;
   carryName: string | null;
   onEdit: () => void;
+  onContribute: (amount: string, note?: string) => Promise<boolean>;
+  onCancelContribution: (id: number) => Promise<boolean>;
 }
 
-function WalletCard({ wallet, tree, money, carryName, onEdit }: CardProps) {
+function WalletCard({
+  wallet,
+  tree,
+  money,
+  carryName,
+  onEdit,
+  onContribute,
+  onCancelContribution,
+}: CardProps) {
   const available = toCents(wallet.available);
   const balance = toCents(wallet.balance);
   const handed = toCents(wallet.children_allocation);
@@ -201,6 +221,8 @@ function WalletCard({ wallet, tree, money, carryName, onEdit }: CardProps) {
         {handed !== 0 &&
           ` (${money(wallet.allocation)} dont ${money(wallet.children_allocation)} répartis)`}
         {toCents(wallet.carried_in) !== 0 && `, report ${money(wallet.carried_in)}`}
+        {toCents(wallet.contributions) !== 0 &&
+          `, apport ${money(wallet.contributions)}`}
       </p>
 
       {/* Une mère débordée par ses filles est un signal à montrer : le corriger
@@ -225,6 +247,98 @@ function WalletCard({ wallet, tree, money, carryName, onEdit }: CardProps) {
 
       {carryName && (
         <p className="wallet__carry">Reliquat de fin de mois versé à {carryName}</p>
+      )}
+
+      <ContributionBox
+        wallet={wallet}
+        money={money}
+        onContribute={onContribute}
+        onCancel={onCancelContribution}
+      />
+    </div>
+  );
+}
+
+interface ContributionProps {
+  wallet: WalletInfo;
+  money: (raw: string) => string;
+  onContribute: (amount: string, note?: string) => Promise<boolean>;
+  onCancel: (id: number) => Promise<boolean>;
+}
+
+/**
+ * Apports ponctuels du mois.
+ *
+ * Ils sont montrés séparément de la dotation : confondre les deux ferait
+ * croire que l'enveloppe est mieux dotée qu'elle ne l'est, et le mois suivant
+ * démentirait cette lecture.
+ */
+function ContributionBox({ wallet, money, onContribute, onCancel }: ContributionProps) {
+  const [open, setOpen] = useState(false);
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!amount.trim()) return;
+    if (await onContribute(amount, note)) {
+      setAmount("");
+      setNote("");
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className="wallet__contributions">
+      {wallet.contribution_entries.length > 0 && (
+        <ul className="contribution__list">
+          {wallet.contribution_entries.map((entry) => (
+            <li key={entry.id} className="contribution">
+              <span className="contribution__amount">{money(entry.amount)}</span>
+              {entry.note && <span className="contribution__note">{entry.note}</span>}
+              <button
+                type="button"
+                className="contribution__cancel"
+                title="Annuler cet apport"
+                onClick={() => void onCancel(entry.id)}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {open ? (
+        <form className="contribution__form" onSubmit={submit}>
+          <input
+            value={amount}
+            inputMode="decimal"
+            placeholder="Montant"
+            aria-label="Montant de l'apport"
+            onChange={(e) => setAmount(e.target.value)}
+          />
+          <input
+            value={note}
+            placeholder="Motif (facultatif)"
+            aria-label="Motif de l'apport"
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <button type="submit" disabled={!amount.trim()}>
+            Verser
+          </button>
+          <button type="button" onClick={() => setOpen(false)}>
+            Annuler
+          </button>
+        </form>
+      ) : (
+        <button
+          type="button"
+          className="contribution__open"
+          onClick={() => setOpen(true)}
+        >
+          + Apport ponctuel
+        </button>
       )}
     </div>
   );

@@ -246,6 +246,30 @@ export async function updateWallet(
   if (!response.ok) throw new Error(await errorOf(response));
 }
 
+/**
+ * Verse un apport ponctuel à une enveloppe.
+ *
+ * Distinct de la dotation, qui revient chaque mois : celui-ci ne vaut que pour
+ * le mois où il est versé.
+ */
+export async function addContribution(
+  walletId: number,
+  amount: string,
+  note?: string,
+): Promise<void> {
+  const response = await fetch(`/api/wallets/${walletId}/contributions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ amount, note: note || null }),
+  });
+  if (!response.ok) throw new Error(await errorOf(response));
+}
+
+export async function removeContribution(id: number): Promise<void> {
+  const response = await fetch(`/api/contributions/${id}`, { method: "DELETE" });
+  if (!response.ok) throw new Error(await errorOf(response));
+}
+
 export async function removeWallet(id: number): Promise<void> {
   const response = await fetch(`/api/wallets/${id}`, { method: "DELETE" });
   if (!response.ok) throw new Error(await errorOf(response));

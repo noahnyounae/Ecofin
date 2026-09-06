@@ -662,12 +662,24 @@ pub struct WalletView {
     pub start: String,
     /// Reliquat reçu du mois précédent.
     pub carried_in: String,
+    /// Apports ponctuels versés ce mois-ci, hors dotation.
+    pub contributions: String,
+    /// Le détail de ces apports, pour pouvoir en annuler un.
+    pub contribution_entries: Vec<ContributionView>,
     /// Somme signée des mouvements du mois : négative quand on a dépensé.
     pub movements: String,
     /// Ce dont l'enveloppe disposait avant toute dépense.
     pub available: String,
     /// Ce qu'il reste.
     pub balance: String,
+}
+
+/// Un apport ponctuel versé à une enveloppe.
+#[derive(Serialize)]
+pub struct ContributionView {
+    pub id: i64,
+    pub amount: String,
+    pub note: Option<String>,
 }
 
 /// L'état des enveloppes sur un mois.
@@ -733,6 +745,15 @@ pub async fn wallets(
 
     let overrides = state.rules_for(user.id)?;
     let redirects = state.with_preferences(|prefs| prefs.redirects(user.id))?;
+    let given = state.with_preferences(|prefs| prefs.contributions(user.id))?;
+    let contributions: Vec<ecofin_core::wallets::Contribution> = given
+        .iter()
+        .map(|c| ecofin_core::wallets::Contribution {
+            wallet_id: c.wallet_id,
+            month: c.month,
+            amount: c.amount,
+        })
+        .collect();
 
     let (movements, account_balance) = state.with_store(|store| {
         let own_names = store.own_account_names()?;
@@ -762,7 +783,7 @@ pub async fn wallets(
         Ok((movements, balance))
     })?;
 
-    let states = ecofin_core::wallets::project(&engine, &movements, month);
+    let states = ecofin_core::wallets::project(&engine, &movements, &contributions, month);
     let current = ecofin_core::wallets::states_for(&states, month);
 
     let views: Vec<WalletView> = defs
@@ -789,6 +810,16 @@ pub async fn wallets(
                 overallocated: state.allocation < rust_decimal::Decimal::ZERO,
                 start: def.start.to_string(),
                 carried_in: state.carried_in.to_string(),
+                contributions: state.contributions.to_string(),
+                contribution_entries: given
+                    .iter()
+                    .filter(|c| c.wallet_id == def.id && c.month == month)
+                    .map(|c| ContributionView {
+                        id: c.id,
+                        amount: c.amount.to_string(),
+                        note: c.note.clone(),
+                    })
+                    .collect(),
                 movements: state.movements.to_string(),
                 available: state.available().to_string(),
                 balance: state.balance.to_string(),
@@ -905,4 +936,57 @@ fn parse_amount(raw: &str) -> Result<rust_decimal::Decimal, ApiError> {
 
 fn bad_request(err: anyhow::Error) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, format!("{err:#}"))
+}
+
+/// Versement d'un apport ponctuel.
+#[derive(Deserialize)]
+pub struct NewContribution {
+    pub amount: String,
+    /// Mois auquel le rattacher, écrit `AAAA-MM`. Le mois courant par défaut.
+    #[serde(default)]
+    pub month: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Verse un apport ponctuel à une enveloppe.
+///
+/// Distinct de la dotation, qui est une consigne permanente : celui-ci ne vaut
+/// que pour son mois, et ne se prend pas sur le budget d'une enveloppe mère.
+pub async fn add_contribution(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<Authenticated>,
+    Path(id): Path<i64>,
+    axum::Json(body): axum::Json<NewContribution>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let amount = parse_amount(&body.amount)?;
+    let month = match body.month.as_deref() {
+        Some(text) => ecofin_core::wallets::Month::parse(text).ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("mois « {text} » illisible, attendu AAAA-MM"),
+            )
+        })?,
+        None => ecofin_core::wallets::Month::of(chrono::Utc::now().date_naive()),
+    };
+
+    let created = state
+        .with_preferences(|prefs| {
+            prefs.add_contribution(user.id, id, month, amount, body.note.as_deref())
+        })
+        .map_err(bad_request)?;
+
+    Ok(Json(serde_json::json!({ "id": created })))
+}
+
+/// Annule un apport ponctuel.
+pub async fn remove_contribution(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<Authenticated>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .with_preferences(|prefs| prefs.remove_contribution(user.id, id))
+        .map_err(bad_request)?;
+    Ok(StatusCode::NO_CONTENT)
 }

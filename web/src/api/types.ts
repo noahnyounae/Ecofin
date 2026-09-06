@@ -162,12 +162,24 @@ export interface WalletInfo {
   start: string;
   /** Reliquat reçu du mois précédent. */
   carried_in: string;
+  /** Apports ponctuels versés ce mois-ci, hors dotation. */
+  contributions: string;
+  /** Le détail de ces apports, pour pouvoir en annuler un. */
+  contribution_entries: ContributionInfo[];
   /** Somme signée des mouvements du mois : négative quand on a dépensé. */
   movements: string;
   /** Ce dont l'enveloppe disposait avant toute dépense. */
   available: string;
   /** Ce qu'il reste. */
   balance: string;
+}
+
+/** Un apport ponctuel versé à une enveloppe. */
+export interface ContributionInfo {
+  id: number;
+  /** Signé : négatif, l'apport est un retrait. */
+  amount: string;
+  note: string | null;
 }
 
 /** L'état des enveloppes sur un mois. */

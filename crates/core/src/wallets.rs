@@ -127,6 +127,24 @@ pub struct Wallet {
     pub start: Month,
 }
 
+/// Un apport ponctuel versé à une enveloppe.
+///
+/// Distinct de la dotation, qui est une consigne permanente : celui-ci ne vaut
+/// que pour le mois où il est versé. Une prime qu'on met de côté, un
+/// réajustement en cours de route.
+///
+/// Il ne se prend **pas** sur la dotation de la mère : c'est de l'argent qui
+/// vient de la part non allouée du compte, et non du budget de la branche. Une
+/// mère n'est donc pas appauvrie parce qu'on a renfloué une de ses filles.
+///
+/// Le montant est signé : négatif, l'apport devient un retrait.
+#[derive(Debug, Clone)]
+pub struct Contribution {
+    pub wallet_id: i64,
+    pub month: Month,
+    pub amount: Decimal,
+}
+
 /// Un mouvement observé, déjà rattaché à sa catégorie.
 ///
 /// Le montant est signé comme en banque : négatif pour une dépense. Un
@@ -150,9 +168,11 @@ pub struct MonthlyState {
     /// Pour une mère, c'est ce qui lui reste après avoir doté ses filles :
     /// négatif si elles réclament plus qu'elle n'a.
     pub allocation: Decimal,
+    /// Apports ponctuels versés ce mois-ci, hors dotation.
+    pub contributions: Decimal,
     /// Somme signée des mouvements imputés. Négative quand on a dépensé.
     pub movements: Decimal,
-    /// Ce qui reste : `carried_in + allocation + movements`.
+    /// Ce qui reste : `carried_in + allocation + contributions + movements`.
     ///
     /// Peut être négatif : une enveloppe dépassée reporte sa dette plutôt que
     /// de la faire disparaître au changement de mois.
@@ -162,7 +182,7 @@ pub struct MonthlyState {
 impl MonthlyState {
     /// Ce dont l'enveloppe disposait avant toute dépense.
     pub fn available(&self) -> Decimal {
-        self.carried_in + self.allocation
+        self.carried_in + self.allocation + self.contributions
     }
 }
 
@@ -243,7 +263,12 @@ pub fn branch(wallets: &[Wallet], id: i64) -> HashSet<i64> {
 /// répercute donc sur tous les mois suivants au lieu de laisser un solde faux
 /// derrière elle. C'est aussi pourquoi changer une dotation réécrit le passé :
 /// la dotation est une consigne permanente, pas un versement historique.
-pub fn project(wallets: &[Wallet], movements: &[Movement], through: Month) -> Vec<MonthlyState> {
+pub fn project(
+    wallets: &[Wallet],
+    movements: &[Movement],
+    contributions: &[Contribution],
+    through: Month,
+) -> Vec<MonthlyState> {
     let Some(first) = wallets.iter().map(|w| w.start).min() else {
         return Vec::new();
     };
@@ -256,6 +281,15 @@ pub fn project(wallets: &[Wallet], movements: &[Movement], through: Month) -> Ve
     let mut by_month: HashMap<Month, Vec<&Movement>> = HashMap::new();
     for movement in movements {
         by_month.entry(movement.month).or_default().push(movement);
+    }
+
+    // Regroupés une fois, comme les mouvements : les reparcourir pour chaque
+    // enveloppe et chaque mois coûterait le produit des trois.
+    let mut given: HashMap<(i64, Month), Decimal> = HashMap::new();
+    for contribution in contributions {
+        *given
+            .entry((contribution.wallet_id, contribution.month))
+            .or_insert(Decimal::ZERO) += contribution.amount;
     }
 
     let known: HashSet<i64> = wallets.iter().map(|w| w.id).collect();
@@ -284,13 +318,18 @@ pub fn project(wallets: &[Wallet], movements: &[Movement], through: Month) -> Ve
                 .get(&wallet.id)
                 .copied()
                 .unwrap_or(wallet.allocation);
-            let balance = carried_in + allocation + moved;
+            let contributed = given
+                .get(&(wallet.id, month))
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            let balance = carried_in + allocation + contributed + moved;
 
             states.push(MonthlyState {
                 wallet_id: wallet.id,
                 month,
                 carried_in,
                 allocation,
+                contributions: contributed,
                 movements: moved,
                 balance,
             });
@@ -379,7 +418,7 @@ mod tests {
         let wallets = vec![enveloppe(1, "Alimentation", "300", &["groceries"])];
         let movements = vec![depense("2026-01", "groceries", "-290")];
 
-        let states = project(&wallets, &movements, mois("2026-02"));
+        let states = project(&wallets, &movements, &[], mois("2026-02"));
 
         assert_eq!(solde(&states, 1, "2026-01"), dec("10"));
         assert_eq!(solde(&states, 1, "2026-02"), dec("310"));
@@ -390,7 +429,7 @@ mod tests {
     fn an_untouched_wallet_accumulates() {
         let wallets = vec![enveloppe(1, "Abonnements", "50", &["subscriptions"])];
 
-        let states = project(&wallets, &[], mois("2026-03"));
+        let states = project(&wallets, &[], &[], mois("2026-03"));
 
         assert_eq!(solde(&states, 1, "2026-01"), dec("50"));
         assert_eq!(solde(&states, 1, "2026-03"), dec("150"));
@@ -403,7 +442,7 @@ mod tests {
         let wallets = vec![enveloppe(1, "Alimentation", "300", &["groceries"])];
         let movements = vec![depense("2026-01", "groceries", "-350")];
 
-        let states = project(&wallets, &movements, mois("2026-02"));
+        let states = project(&wallets, &movements, &[], mois("2026-02"));
 
         assert_eq!(solde(&states, 1, "2026-01"), dec("-50"));
         assert_eq!(solde(&states, 1, "2026-02"), dec("250"));
@@ -423,7 +462,7 @@ mod tests {
             depense("2026-01", "leisure", "-300"),
         ];
 
-        let states = project(&[a, b], &movements, mois("2026-02"));
+        let states = project(&[a, b], &movements, &[], mois("2026-02"));
 
         assert_eq!(solde(&states, 1, "2026-01"), dec("10"));
         // A rouvre à sa seule dotation : son reliquat est parti.
@@ -445,7 +484,7 @@ mod tests {
             depense("2026-01", "leisure", "-20"),
         ];
 
-        let states = project(&[a, b], &movements, mois("2026-02"));
+        let states = project(&[a, b], &movements, &[], mois("2026-02"));
 
         let fin_janvier = solde(&states, 1, "2026-01") + solde(&states, 2, "2026-01");
         let ouverture_fevrier = states
@@ -466,7 +505,7 @@ mod tests {
         let mut b = enveloppe(2, "B", "200", &["leisure"]);
         b.carry_to = Some(1);
 
-        let states = project(&[a, b], &[], mois("2026-02"));
+        let states = project(&[a, b], &[], &[], mois("2026-02"));
 
         assert_eq!(solde(&states, 1, "2026-02"), dec("300"));
         assert_eq!(solde(&states, 2, "2026-02"), dec("300"));
@@ -478,7 +517,7 @@ mod tests {
         let mut a = enveloppe(1, "A", "300", &["groceries"]);
         a.carry_to = Some(404);
 
-        let states = project(&[a], &[], mois("2026-02"));
+        let states = project(&[a], &[], &[], mois("2026-02"));
 
         assert_eq!(solde(&states, 1, "2026-02"), dec("600"));
     }
@@ -490,7 +529,7 @@ mod tests {
         let mut a = enveloppe(1, "A", "300", &["groceries"]);
         a.carry_to = Some(1);
 
-        let states = project(&[a], &[], mois("2026-02"));
+        let states = project(&[a], &[], &[], mois("2026-02"));
 
         assert_eq!(solde(&states, 1, "2026-02"), dec("600"));
     }
@@ -505,7 +544,7 @@ mod tests {
             depense("2026-01", "groceries", "40"),
         ];
 
-        let states = project(&wallets, &movements, mois("2026-01"));
+        let states = project(&wallets, &movements, &[], mois("2026-01"));
 
         assert_eq!(solde(&states, 1, "2026-01"), dec("50"));
     }
@@ -520,7 +559,7 @@ mod tests {
             depense("2026-01", "leisure", "-70"),
         ];
 
-        let states = project(&wallets, &movements, mois("2026-01"));
+        let states = project(&wallets, &movements, &[], mois("2026-01"));
 
         assert_eq!(solde(&states, 1, "2026-01"), dec("60"));
     }
@@ -532,7 +571,7 @@ mod tests {
         tardive.start = mois("2026-03");
         let wallets = vec![enveloppe(1, "Ancienne", "50", &["groceries"]), tardive];
 
-        let states = project(&wallets, &[], mois("2026-03"));
+        let states = project(&wallets, &[], &[], mois("2026-03"));
 
         assert!(
             !states
@@ -544,7 +583,7 @@ mod tests {
 
     #[test]
     fn without_wallets_there_is_nothing_to_project() {
-        assert!(project(&[], &[], mois("2026-01")).is_empty());
+        assert!(project(&[], &[], &[], mois("2026-01")).is_empty());
     }
 
     /// Demander un mois antérieur à toute dotation ne rend rien, plutôt que de
@@ -552,14 +591,14 @@ mod tests {
     #[test]
     fn a_month_before_the_first_allocation_yields_nothing() {
         let wallets = vec![enveloppe(1, "A", "300", &["groceries"])];
-        assert!(project(&wallets, &[], mois("2025-12")).is_empty());
+        assert!(project(&wallets, &[], &[], mois("2025-12")).is_empty());
     }
 
     #[test]
     fn available_is_what_the_envelope_held_before_spending() {
         let wallets = vec![enveloppe(1, "A", "300", &["groceries"])];
         let movements = vec![depense("2026-01", "groceries", "-290")];
-        let states = project(&wallets, &movements, mois("2026-02"));
+        let states = project(&wallets, &movements, &[], mois("2026-02"));
 
         let fevrier = states.iter().find(|s| s.month == mois("2026-02")).unwrap();
         assert_eq!(fevrier.available(), dec("310"));
@@ -637,7 +676,7 @@ mod tests {
         let fille_a = fille(2, "Alimentation", "300", 1, &["groceries"]);
         let movements = vec![depense("2026-01", "groceries", "-290")];
 
-        let states = project(&[mere, fille_a], &movements, mois("2026-01"));
+        let states = project(&[mere, fille_a], &movements, &[], mois("2026-01"));
 
         // 500 dotés, 300 confiés à la fille : il reste 200 à la mère.
         assert_eq!(solde(&states, 1, "2026-01"), dec("200"));
@@ -652,7 +691,7 @@ mod tests {
         let fille_a = fille(2, "Alimentation", "300", 1, &["groceries"]);
         let movements = vec![depense("2026-01", "groceries", "-290")];
 
-        let states = project(&[mere, fille_a], &movements, mois("2026-02"));
+        let states = project(&[mere, fille_a], &movements, &[], mois("2026-02"));
 
         assert_eq!(solde(&states, 2, "2026-02"), dec("310"));
         assert_eq!(solde(&states, 1, "2026-02"), dec("400"));
@@ -666,7 +705,7 @@ mod tests {
         fille_a.carry_to = Some(1);
         let movements = vec![depense("2026-01", "groceries", "-290")];
 
-        let states = project(&[mere, fille_a], &movements, mois("2026-02"));
+        let states = project(&[mere, fille_a], &movements, &[], mois("2026-02"));
 
         assert_eq!(solde(&states, 2, "2026-02"), dec("300"));
         // 200 de janvier, plus les 10 de sa fille, plus les 200 de février.
@@ -709,6 +748,107 @@ mod tests {
         assert_eq!(effective_allocations(&[seule])[&1], dec("300"));
     }
 
+    fn apport(id: i64, month: &str, montant: &str) -> Contribution {
+        Contribution {
+            wallet_id: id,
+            month: mois(month),
+            amount: dec(montant),
+        }
+    }
+
+    /// Un apport ponctuel s'ajoute au mois où il est versé, hors dotation.
+    #[test]
+    fn a_one_off_contribution_adds_to_its_month() {
+        let wallets = vec![enveloppe(1, "Vacances", "100", &["leisure"])];
+        let apports = vec![apport(1, "2026-01", "500")];
+
+        let states = project(&wallets, &[], &apports, mois("2026-01"));
+
+        assert_eq!(solde(&states, 1, "2026-01"), dec("600"));
+    }
+
+    /// Il ne vaut que pour son mois : la dotation, elle, revient chaque mois.
+    #[test]
+    fn a_one_off_contribution_does_not_repeat() {
+        let wallets = vec![enveloppe(1, "Vacances", "100", &["leisure"])];
+        let apports = vec![apport(1, "2026-01", "500")];
+
+        let states = project(&wallets, &[], &apports, mois("2026-02"));
+
+        // Reporté, mais non reversé : 600 de janvier, plus les 100 de février.
+        assert_eq!(solde(&states, 1, "2026-02"), dec("700"));
+        let fevrier = states
+            .iter()
+            .find(|s| s.wallet_id == 1 && s.month == mois("2026-02"))
+            .unwrap();
+        assert_eq!(fevrier.contributions, Decimal::ZERO);
+    }
+
+    /// Il est comptabilisé à part : l'écran doit pouvoir distinguer ce qui
+    /// vient de la consigne permanente de ce qui a été versé à la main.
+    #[test]
+    fn a_contribution_is_counted_apart_from_the_allocation() {
+        let wallets = vec![enveloppe(1, "Vacances", "100", &["leisure"])];
+        let apports = vec![apport(1, "2026-01", "500")];
+
+        let states = project(&wallets, &[], &apports, mois("2026-01"));
+        let janvier = &states[0];
+
+        assert_eq!(janvier.allocation, dec("100"));
+        assert_eq!(janvier.contributions, dec("500"));
+        assert_eq!(janvier.available(), dec("600"));
+    }
+
+    /// Un apport ne se prend pas sur la dotation de la mère : il vient de la
+    /// part non allouée du compte, non du budget de la branche.
+    #[test]
+    fn a_contribution_to_a_child_does_not_impoverish_its_mother() {
+        let mere = enveloppe(1, "Vie courante", "500", &["housing"]);
+        let mut fille = enveloppe(2, "Alimentation", "300", &["groceries"]);
+        fille.parent = Some(1);
+        let apports = vec![apport(2, "2026-01", "200")];
+
+        let states = project(&[mere, fille], &[], &apports, mois("2026-01"));
+
+        // La mère garde ses 200 : 500 dotés, 300 confiés à sa fille.
+        assert_eq!(solde(&states, 1, "2026-01"), dec("200"));
+        assert_eq!(solde(&states, 2, "2026-01"), dec("500"));
+    }
+
+    /// Un montant négatif retire de l'enveloppe.
+    #[test]
+    fn a_negative_contribution_is_a_withdrawal() {
+        let wallets = vec![enveloppe(1, "Vacances", "100", &["leisure"])];
+        let apports = vec![apport(1, "2026-01", "-40")];
+
+        let states = project(&wallets, &[], &apports, mois("2026-01"));
+
+        assert_eq!(solde(&states, 1, "2026-01"), dec("60"));
+    }
+
+    /// Plusieurs apports le même mois s'additionnent.
+    #[test]
+    fn several_contributions_in_one_month_add_up() {
+        let wallets = vec![enveloppe(1, "Vacances", "0", &["leisure"])];
+        let apports = vec![apport(1, "2026-01", "200"), apport(1, "2026-01", "50")];
+
+        let states = project(&wallets, &[], &apports, mois("2026-01"));
+
+        assert_eq!(solde(&states, 1, "2026-01"), dec("250"));
+    }
+
+    /// Un apport visant une enveloppe inconnue est ignoré, sans fausser les
+    /// autres : une enveloppe supprimée ne doit pas emporter le calcul.
+    #[test]
+    fn a_contribution_to_an_unknown_wallet_is_ignored() {
+        let wallets = vec![enveloppe(1, "Vacances", "100", &["leisure"])];
+        let apports = vec![apport(404, "2026-01", "500")];
+
+        let states = project(&wallets, &[], &apports, mois("2026-01"));
+
+        assert_eq!(solde(&states, 1, "2026-01"), dec("100"));
+    }
+
     /// La projection est bornée : une date de départ aberrante ne doit pas
     /// faire tourner le serveur à chaque affichage.
     #[test]
@@ -716,7 +856,7 @@ mod tests {
         let mut ancienne = enveloppe(1, "A", "1", &["groceries"]);
         ancienne.start = mois("1900-01");
 
-        let states = project(&ancienne_seule(ancienne), &[], mois("2026-01"));
+        let states = project(&ancienne_seule(ancienne), &[], &[], mois("2026-01"));
 
         assert!(states.len() <= MAX_MONTHS);
     }

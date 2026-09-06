@@ -68,6 +68,14 @@ async fn main() -> Result<()> {
             "/api/wallets/{id}",
             axum::routing::put(api::update_wallet).delete(api::remove_wallet),
         )
+        .route(
+            "/api/wallets/{id}/contributions",
+            axum::routing::post(api::add_contribution),
+        )
+        .route(
+            "/api/contributions/{id}",
+            axum::routing::delete(api::remove_contribution),
+        )
         .route("/api/rules", get(api::rules).put(api::set_rule))
         .route(
             "/api/rules/{label}",

@@ -16,6 +16,8 @@ function enveloppe(id: number, name: string, parent: number | null = null): Wall
     overallocated: false,
     start: "2026-01",
     carried_in: "0",
+    contributions: "0",
+    contribution_entries: [],
     movements: "0",
     available: "0",
     balance: "0",

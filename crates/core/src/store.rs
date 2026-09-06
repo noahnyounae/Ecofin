@@ -70,7 +70,7 @@ pub struct ImportReport {
 ///
 /// Les migrations sont l'affaire du CLI ; un consommateur en lecture seule
 /// vérifie seulement qu'il tombe sur la version qu'il sait lire.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 impl Store {
     /// Base en mémoire, au schéma réel.
@@ -1513,6 +1513,34 @@ fn upgrade(conn: &Connection) -> Result<()> {
                 "#,
         )
         .context("emboîtement des portefeuilles")?;
+    }
+
+    if version < 8 {
+        // v8 : les apports ponctuels.
+        //
+        // La dotation est une consigne permanente, rejouée chaque mois. Un
+        // apport ne vaut que pour le mois où il est versé : il doit donc être
+        // consigné, et non déduit d'un réglage — rien dans l'état courant ne
+        // permettrait de le retrouver.
+        conn.execute_batch(
+            r#"
+                BEGIN;
+                CREATE TABLE IF NOT EXISTS wallet_contributions (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id   INTEGER NOT NULL,
+                    wallet_id INTEGER NOT NULL,
+                    -- Le mois auquel il se rattache, écrit AAAA-MM.
+                    month     TEXT NOT NULL,
+                    -- En texte comme les autres montants, décimales intactes.
+                    amount    TEXT NOT NULL,
+                    note      TEXT,
+                    created_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 8;
+                COMMIT;
+                "#,
+        )
+        .context("création des apports ponctuels")?;
     }
 
     Ok(())
